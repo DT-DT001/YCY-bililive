@@ -21,23 +21,21 @@ class MyHandler(blivedm.BaseHandler):
             cmd = cmd[:pos]
 
         if cmd == 'LIKE_INFO_V3_CLICK':
-            uname = command.get('data', {}).get('uname', '未知用户')
-            self._on_like(client, uname)
+            # 恢复单次点赞的触发！并且抓取用户的连击数(click_count)
+            data = command.get('data', {})
+            uname = data.get('uname', '未知用户')
+            click_count = data.get('click_count', 1)
+            self.log_callback(f"👍 [{uname}] 为主播点赞了 {click_count} 次!", "system")
+            # 将事件作为 "like" 类型传递出去，value 为该用户的点赞连击数
+            self.trigger_callback("like", "点赞", uname, 0, click_count)
             return
             
         if cmd == 'LIKE_INFO_V3_UPDATE':
-            data = command.get('data', {})
-            click_count = data.get('click_count', 0)
-            if click_count > 0:
-                self.trigger_callback("like_update", "点赞总数更新", "系统", 0, click_count)
+            # UPDATE 的触发太容易被B站服务器限流或者状态卡死，这里我们完全废弃 UPDATE 触发，
+            # 仅用于在后台同步日志，不往主程序传递触发事件。
             return
 
         super().handle(client, command)
-
-    def _on_like(self, client: blivedm.BLiveClient, uname: str, guard_level: int = 0):
-        # 取消在这里积攒 10 次的逻辑，每次点赞直接上报
-        self.log_callback(f"👍 [{uname}] 为主播点赞了!", "system")
-        self.trigger_callback("like", "点赞", uname, guard_level, 1)
 
     def _on_danmaku(self, client: blivedm.BLiveClient, message: blivedm.models.web.DanmakuMessage):
         msg = f"[{message.uname}] {message.msg}"

@@ -252,12 +252,67 @@ async def main(page: ft.Page):
     last_total_like_count = 0
     user_trigger_counters = {}
 
+    async def like_processor_task():
+        nonlocal global_like_counter, global_like_trigger_count
+        while True:
+            try:
+                threshold = int(like_trigger_threshold.controls[1].content.value)
+            except Exception:
+                threshold = 10
+                
+            if global_like_counter >= threshold:
+                global_like_counter -= threshold
+                
+                # Check if device stopped to reset combo
+                current_rem = ycy.get_max_remaining()
+                if current_rem <= 0:
+                    global_like_trigger_count = 0
+                    
+                global_like_trigger_count += 1
+                
+                b_int, b_time, i_int, i_time, max_int = get_config_values(config_like_global)
+                intensity = b_int + i_int * (global_like_trigger_count - 1)
+                intensity = min(intensity, max_int)
+                
+                if current_rem > 0:
+                    duration = current_rem + i_time
+                else:
+                    duration = b_time
+                
+                add_log(f"💖 直播间点赞达到 {threshold} 次，激活电击! 强度:{intensity:.1f}", "system")
+                
+                intensity_clamped = max(0, min(180, intensity))
+                if intensity_clamped > 0:
+                    try:
+                        config_a = {
+                            "enable": channel_a.enable_switch.value,
+                            "wave_list": list(channel_a.selected_waveforms),
+                            "mode_type": channel_a.play_mode_dropdown.value
+                        }
+                        config_b = {
+                            "enable": channel_b.enable_switch.value,
+                            "wave_list": list(channel_b.selected_waveforms),
+                            "mode_type": channel_b.play_mode_dropdown.value
+                        }
+                        await ycy.send_command(intensity_clamped, duration, config_a, config_b)
+                    except Exception as e:
+                        add_log(f"触发指令发送失败: {e}", "error")
+                
+                # 固定的节流间隔，形成阶梯递增，完美实现基于剩余时间的增时扩展
+                await asyncio.sleep(0.5)
+            else:
+                await asyncio.sleep(0.5)
+
+    # 启动后台点赞处理队列 (将在UI完全加载后由底部启动)
+
     async def handle_trigger(event_type, item_name, user, guard_level=0, value=0):
         """处理来自直播间的事件触发"""
         nonlocal global_like_counter, global_like_trigger_count, last_total_like_count
         
+        current_rem = ycy.get_max_remaining()
+        
         # 检查当前设备是否还在放电，如果已经停机，则重置所有叠加计数（断掉连击）
-        if ycy.get_max_remaining() <= 0:
+        if current_rem <= 0:
             global_like_trigger_count = 0
             user_trigger_counters.clear()
             
@@ -279,70 +334,27 @@ async def main(page: ft.Page):
                 b_int, b_time, i_int, i_time, max_int = get_config_values(config_dm_normal)
                 prefix = "⭐"
             intensity = b_int + i_int * (count - 1)
-            duration = b_time + i_time * (count - 1)
             intensity = min(intensity, max_int)
+            
+            if current_rem > 0:
+                duration = current_rem + i_time
+            else:
+                duration = b_time
+                
             add_log(f"{prefix} [{user}] 触发词 [{item_name}] 激活电击! 强度:{intensity:.1f}", "system")
                 
-        elif event_type == "like_update":
-            # 基于直播间总点赞数更新 (LIKE_INFO_V3_UPDATE)
+        elif event_type == "like":
+            # 采用兼容并包的备用点赞触发方案 (如果用户通过 CLICK 事件触发)
             try:
                 threshold = int(like_trigger_threshold.controls[1].content.value)
             except Exception:
                 threshold = 10
-                
-            current_total_likes = value
             
-            # 初始化基准点赞数，防止刚开播/刚连接时旧的点赞数瞬间触发海量电击
-            if last_total_like_count == 0:
-                last_total_like_count = current_total_likes
-                return
-                
-            new_likes = current_total_likes - last_total_like_count
-            if new_likes > 0:
-                global_like_counter += new_likes
-                last_total_like_count = current_total_likes
-                
-                # 计算新点赞数能触发多少次
-                trigger_times = global_like_counter // threshold
-                
-                if trigger_times > 0:
-                    # 循环逐次触发，避免合并触发导致强度溢出或跳档
-                    for _ in range(trigger_times):
-                        global_like_counter -= threshold
-                        global_like_trigger_count += 1 
-                        
-                        b_int, b_time, i_int, i_time, max_int = get_config_values(config_like_global)
-                        intensity = b_int + i_int * (global_like_trigger_count - 1)
-                        duration = b_time + i_time * (global_like_trigger_count - 1)
-                        intensity = min(intensity, max_int)
-                        
-                        add_log(f"💖 直播间点赞达到 {threshold} 次，激活电击! 强度:{intensity:.1f}", "system")
-                        
-                        # 立即下发该次触发
-                        intensity_clamped = max(0, min(180, intensity))
-                        if intensity_clamped > 0:
-                            try:
-                                config_a = {
-                                    "enable": channel_a.enable_switch.value,
-                                    "wave_list": list(channel_a.selected_waveforms),
-                                    "mode_type": channel_a.play_mode_dropdown.value
-                                }
-                                config_b = {
-                                    "enable": channel_b.enable_switch.value,
-                                    "wave_list": list(channel_b.selected_waveforms),
-                                    "mode_type": channel_b.play_mode_dropdown.value
-                                }
-                                await ycy.send_command(intensity_clamped, duration, config_a, config_b)
-                            except Exception as e:
-                                add_log(f"触发指令发送失败: {e}", "error")
-                                
-                        await asyncio.sleep(0.1)
-                    return
-                else:
-                    return
-            else:
-                return
-                
+            # 单次点赞事件通常 click_count 至少是 1
+            click_count = value if value > 0 else 1
+            global_like_counter += click_count
+            return
+            
         elif event_type == "gift":
             battery = value
             if guard_level == 1 or guard_level == 2:
@@ -357,8 +369,11 @@ async def main(page: ft.Page):
             intensity = b_int + battery * m_int
             intensity = min(intensity, max_int)
             
-            # 礼物触发不再累加之前剩余的时间，每次触发都基于当前计算出的时间进行独立重置
-            duration = b_time + battery * m_time
+            if current_rem > 0:
+                duration = current_rem + battery * m_time
+            else:
+                duration = b_time + battery * m_time
+                
             add_log(f"{prefix} [{user}] 赠送 {item_name}({battery}电池) 激活电击! 强度:{intensity:.1f}", "system")
             
         elif event_type == "buy_guard":
@@ -371,8 +386,13 @@ async def main(page: ft.Page):
                 b_int, b_time, i_int, i_time, max_int = get_config_values(config_buy_guard)
                 prefix = "🚢 上舰长"
             intensity = b_int + i_int * (count - 1)
-            duration = b_time + i_time * (count - 1)
             intensity = min(intensity, max_int)
+            
+            if current_rem > 0:
+                duration = current_rem + i_time
+            else:
+                duration = b_time
+                
             add_log(f"{prefix} [{user}] 激活专属震撼电击! 强度:{intensity:.1f}", "system")
 
         # 限制强度在 0-180 之间
@@ -687,6 +707,7 @@ async def main(page: ft.Page):
 
     # 按钮事件
     async def toggle_bili(e):
+        nonlocal last_total_like_count, global_like_counter, global_like_trigger_count
         # 立即反馈：禁用按钮并让出事件循环，确保点击动画能瞬间渲染
         btn_bili.disabled = True
         btn_bili.update()
@@ -694,6 +715,11 @@ async def main(page: ft.Page):
         
         try:
             if not bili.is_running:
+                # 每次重新连接 B站 时，重置点赞计数器
+                last_total_like_count = 0
+                global_like_counter = 0
+                global_like_trigger_count = 0
+                
                 words = [w.strip() for w in re.split(r'[,，]', trigger_words_input.value) if w.strip()]
                 bili.start(int(room_id_input.value), words)
                 btn_bili.text = "停止监听 B站"
@@ -790,6 +816,9 @@ async def main(page: ft.Page):
             expand=True
         )
     )
+
+    # UI 加载完成后启动后台点赞处理队列
+    page.run_task(like_processor_task)
 
     add_log("欢迎使用 YCY-bililive Python 版控制端。")
     add_log("请确保 YCY 设备已开机，然后点击自动连接。", "system")
